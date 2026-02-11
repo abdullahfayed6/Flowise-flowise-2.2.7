@@ -1,132 +1,67 @@
-Documentation of code edits 
-=======================================
+# Custom Python Function Node
 
-This document lists and explains the source code edits made to enable the `Custom Python Function` node. It focuses only on code changes and rationale; it does not include testing steps.
+This README documents the current behavior of the `Custom Python Function` node and related server-side routing behavior used by `/node-custom-function`.
 
-1) New file added
-- `packages/components/nodes/utilities/CustomPythonFunction/README.md` — documentation file created to record progress and decisions related to the Python node.
+## What this node does
 
-2) Server: route handling for custom functions
-- File: `packages/server/src/services/nodes/index.ts`
-- Change: Extended the existing `executeCustomFunction` function to detect when the incoming request body contains a `pythonFunction` field. When present, the server will:
-  - Prefer the `customPythonFunction` node (if registered) instead of the JavaScript `customFunction` node.
-  - Dynamically import the node module using the node file path discovered at startup, instantiate the node class, and call `init()` with a `nodeData` object containing `pythonFunction`, optional `functionInputVariables`, and `pythonPath`.
-  - Return the node's result as the API response.
+The node executes user-provided Python code in a temporary script and returns JSON-serializable output.
 
-  Rationale: reusing the existing `/node-custom-function` API allows ad-hoc execution of Python-backed custom functions without adding a separate endpoint. The change is contained to the request handling logic and does not alter the existing JavaScript custom function path.
+### Inputs
 
-  Rough summary of the change (high-level, not an exact diff):
-  - Before: only detected/ran `customFunction` (JavaScript) node.
-  - After: if `body.pythonFunction` present and `customPythonFunction` node exists, import/instantiate that node and call `init()` with Python-specific inputs; otherwise fall back to original JS path.
+- `functionInputVariables` (optional, JSON): custom variables injected into the Python execution context.
+- `functionName` (optional, string): display metadata (not required for execution).
+- `pythonFunction` (code): Python function body that is wrapped into `custom_function()`.
+- `pythonPath` (optional, string): Python executable path (`python` by default).
+- `executionTimeout` (optional, number): max runtime in seconds (default: `60`).
 
-3) Types: allow `language` on node parameter definitions
-- File: `packages/components/src/Interface.ts`
-- Change: added an optional `language?: string` property to the `INodeParams` interface.
+### Available variables inside Python
 
-  Rationale: some parameter objects (e.g., code editors) specify a `language` field (like `language: 'python'`), which previously caused a TypeScript error because `INodeParams` did not include that property. Adding the optional property keeps the metadata available for UI/editor components while preserving type safety.
+- `input_text`: current node input string.
+- `vars`: Flowise variables prepared from the runtime context.
+- `flow`: flow/session metadata (`chatflowId`, `sessionId`, `chatId`, `input`).
+- `custom_inputs`: dictionary of all custom input variables with original keys.
+- Sanitized Python locals for custom input keys are also generated when possible.
 
-4) Node implementation
-- File: `packages/components/nodes/utilities/CustomPythonFunction/CustomPythonFunction.ts`
-- Change: implemented node class `CustomPythonFunction_Utilities` (TypeScript). Key behaviors:
-  - Defines inputs: `functionInputVariables`, `functionName`, `pythonFunction`, and `pythonPath`.
-  - Builds a temporary Python script that loads JSON-encoded `scriptData` (input_text, vars, flow, custom inputs), defines `custom_function()` using the provided `pythonFunction` source, executes it, prints JSON-serialized result to stdout, and writes errors to stderr with non-zero exit code.
-  - Writes the script to a temp file, spawns a child Python process using the configured `pythonPath`, captures stdout/stderr, deletes the temp file, and returns parsed JSON output (or raw output on parse failure).
+## Recent reliability updates
 
-  Notes: the node uses existing helper utilities (`getVars`, `handleEscapeCharacters`, `prepareSandboxVars`) from `packages/components/src/utils`.
+1. **Timeout support**
+   - A configurable `executionTimeout` was added.
+   - Python subprocesses are killed when timeout is exceeded to avoid indefinitely hanging workflows.
 
-5) Other small edits
-- File additions/edits: small README addition and server edit; the TypeScript interface tweak above.
+2. **Safer custom variable handling**
+   - Custom input keys are converted to safe Python variable names before local assignment.
+   - Original keys remain accessible through `custom_inputs`.
 
-Rollback / revert notes
-- To revert server behavior, undo the changes in `packages/server/src/services/nodes/index.ts` so that `executeCustomFunction` only executes the `customFunction` node as before.
-- To remove the `language` property from the public API, remove the `language?: string` line from `INodeParams` in `packages/components/src/Interface.ts`. Be aware this may reintroduce the original compile error for nodes that set `language`.
+3. **Empty function body guard**
+   - If no function body is supplied, the node injects `pass` to avoid invalid Python syntax.
 
-Snippets / Diffs (exact patches applied)
--------------------------------------
+4. **Temp-file cleanup**
+   - Temporary script files are cleaned up on both success and failure paths.
 
-Below are the exact code snippets/patches that were applied to the repository to enable the `Custom Python Function` node. Apply these edits in the specified files to reproduce the behavior.
+## Server routing behavior for `/node-custom-function`
 
-- File: `packages/components/src/Interface.ts`
-```diff
-*** Update File: packages/components/src/Interface.ts
-@@ -1,6 +1,7 @@
-   acceptVariable?: boolean
-+    language?: string
-   fileType?: string
+When requests are sent through the custom-function API, server logic now attempts to route Python snippets to `customPythonFunction` when:
+
+- `pythonFunction` is provided, or
+- `language === 'python'`, or
+- `javascriptFunction` appears to be Python code (heuristic detection).
+
+The heuristic recognizes common Python patterns (e.g. `import`, `def`, `return`, list comprehensions, `range(...)`) and avoids explicit JavaScript syntax (`const/let/var`, `function`, `=>`).
+
+This addresses cases like:
+
+```python
+return [i for i in range(1, 10000)]
 ```
 
-- File: `packages/server/src/services/nodes/index.ts` (add Python detection heuristic and prefer Python node)
-```diff
-*** Update File: packages/server/src/services/nodes/index.ts
-@@ -1,6 +1,12 @@
-     const nodeData = { inputs: { functionInputVariables, ...body } }
--        // If a pythonFunction is provided, prefer executing `customPythonFunction` node if available
-     if (body?.pythonFunction && Object.prototype.hasOwnProperty.call(appServer.nodesPool.componentNodes, 'customPythonFunction')) {
-+        // Heuristic: consider Python if `pythonFunction` provided or if `javascriptFunction` looks like Python source
-+        const looksLikePython = (code?: string) => {
-+            if (!code || typeof code !== 'string') return false
-+            return /\bdef\b|\bimport\b|\bprint\(/.test(code)
-+        }
+which previously could be misrouted to the JavaScript executor and fail with `Unexpected token 'for'`.
 
-+        const prefersPython = Boolean(body?.pythonFunction) || looksLikePython(body?.javascriptFunction)
+## Limitations
 
-+        // If Python is preferred and python node is available, execute `customPythonFunction`
-     if (prefersPython && Object.prototype.hasOwnProperty.call(appServer.nodesPool.componentNodes, 'customPythonFunction')) {
-```
+This node is more robust now, but it cannot be guaranteed to work in all environments. Success still depends on:
 
-- File: `packages/server/src/services/nodes/index.ts` (initial cache-busting dynamic import)
-```diff
-*** Update File: packages/server/src/services/nodes/index.ts
-@@ -1,6 +1,8 @@
- import { getRunningExpressApp } from '../../utils/getRunningExpressApp'
-+import { pathToFileURL } from 'url'
-@@ -1,6 +1,8 @@
-         const nodeModule = await import(nodeInstanceFilePath)
--                const nodeModule = await import(nodeInstanceFilePath)
-         const nodeModule = await import(pathToFileURL(nodeInstanceFilePath).toString() + `?t=${Date.now()}`)
-```
+- Python availability at `pythonPath`
+- installed Python dependencies used by user code
+- user code correctness/runtime behavior
+- host OS/process restrictions
 
-- File: `packages/server/src/services/nodes/index.ts` (final: use require + clear cache, and fallback to javascriptFunction if pythonFunction missing)
-```diff
-*** Update File: packages/server/src/services/nodes/index.ts
-@@ -1,6 +1,12 @@
-         const nodeInstanceFilePath = appServer.nodesPool.componentNodes['customPythonFunction'].filePath as string
--                const nodeModule = await import(pathToFileURL(nodeInstanceFilePath).toString() + `?t=${Date.now()}`)
--                const newNodeInstance = new nodeModule.nodeClass()
-         let nodeModule: any
-         try {
-           // clear require cache and load fresh module
-           // eslint-disable-next-line @typescript-eslint/no-var-requires
-           delete require.cache[require.resolve(nodeInstanceFilePath)]
-           // eslint-disable-next-line @typescript-eslint/no-var-requires
-           nodeModule = require(nodeInstanceFilePath)
-         } catch (reqErr) {
-           throw reqErr
-         }
-         const newNodeInstance = new nodeModule.nodeClass()
-@@ -1,6 +1,12 @@
-         // prepare nodeData for python: include provided functionInputVariables if any
--                const pyNodeData = { inputs: { ...pythonFunctionInputVariables, pythonFunction: body.pythonFunction, pythonPath: body.pythonPath, functionName: body.functionName } }
-         // If the client sent code in `javascriptFunction` but it looks like Python, use it as fallback
-         const pythonCode = body.pythonFunction ?? body.javascriptFunction
-         const pyNodeData = { inputs: { ...pythonFunctionInputVariables, pythonFunction: pythonCode, pythonPath: body.pythonPath, functionName: body.functionName } }
-@@ -1,6 +1,12 @@
-         const nodeInstanceFilePath = appServer.nodesPool.componentNodes['customFunction'].filePath as string
--                const nodeModule = await import(pathToFileURL(nodeInstanceFilePath).toString() + `?t=${Date.now()}`)
--                const newNodeInstance = new nodeModule.nodeClass()
-         let nodeModule: any
-         try {
-           // clear require cache and load fresh module
-           // eslint-disable-next-line @typescript-eslint/no-var-requires
-           delete require.cache[require.resolve(nodeInstanceFilePath)]
-           // eslint-disable-next-line @typescript-eslint/no-var-requires
-           nodeModule = require(nodeInstanceFilePath)
-         } catch (reqErr) {
-           throw reqErr
-         }
-         const newNodeInstance = new nodeModule.nodeClass()
-```
-
-Notes
-- The `pathToFileURL` + `?t=...` import was a first attempt to force a fresh import; Node's `import()` with file URL + query can produce `Cannot find module 'file://...?t=...'` errors when the loader treats that as an actual file path. The final approach uses CommonJS `require()` and `delete require.cache[...]` to reload modules reliably in the running process.
-- If you prefer to keep ESM-style imports, ensure node modules are ESM compatible and imported by `pathToFileURL(...).toString()` without a query string, and restart the server after changes.
