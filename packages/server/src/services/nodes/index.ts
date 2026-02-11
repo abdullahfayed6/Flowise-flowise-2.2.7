@@ -133,13 +133,31 @@ const executeCustomFunction = async (requestBody: any) => {
             }
         }
         const nodeData = { inputs: { functionInputVariables, ...body } }
-        // Heuristic: consider Python if `pythonFunction` provided or if `javascriptFunction` looks like Python source
-        const looksLikePython = (code?: string) => {
+        const detectPythonCode = (code?: string) => {
             if (!code || typeof code !== 'string') return false
-            return /\bdef\b|\bimport\b|\bprint\(/.test(code)
+
+            const normalizedCode = code.trim()
+            if (!normalizedCode) return false
+
+            const hasExplicitJavascriptSyntax =
+                /(^|\n)\s*(const|let|var)\s+/.test(normalizedCode) ||
+                /(^|\n)\s*function\s*\(/.test(normalizedCode) ||
+                /=>/.test(normalizedCode)
+
+            if (hasExplicitJavascriptSyntax) return false
+
+            const pythonSignals =
+                /(^|\n)\s*import\s+[a-zA-Z0-9_.]+/.test(normalizedCode) ||
+                /(^|\n)\s*from\s+[a-zA-Z0-9_.]+\s+import\s+/.test(normalizedCode) ||
+                /(^|\n)\s*def\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\(/.test(normalizedCode) ||
+                /(^|\n)\s*return\s+/.test(normalizedCode) ||
+                /\[[^\]]+\s+for\s+[^\]]+\s+in\s+[^\]]+\]/.test(normalizedCode) ||
+                /\brange\s*\(/.test(normalizedCode)
+
+            return pythonSignals
         }
 
-        const prefersPython = Boolean(body?.pythonFunction) || looksLikePython(body?.javascriptFunction)
+        const prefersPython = Boolean(body?.pythonFunction) || body?.language === 'python' || detectPythonCode(body?.javascriptFunction)
 
         // If Python is preferred and python node is available, execute `customPythonFunction`
         if (prefersPython && Object.prototype.hasOwnProperty.call(appServer.nodesPool.componentNodes, 'customPythonFunction')) {
