@@ -8,6 +8,14 @@ import * as path from 'path'
 import * as fs from 'fs'
 import * as os from 'os'
 
+const DEFAULT_TIMEOUT_SECONDS = 60
+
+const toSafePythonVariableName = (rawKey: string, index: number): string => {
+    const normalized = rawKey.replace(/[^A-Za-z0-9_]/g, '_')
+    const prefixed = /^[A-Za-z_]/.test(normalized) ? normalized : `_${normalized}`
+    return prefixed.length > 0 ? prefixed : `custom_input_${index}`
+}
+
 class CustomPythonFunction_Utilities implements INode {
     label: string
     name: string
@@ -62,6 +70,14 @@ class CustomPythonFunction_Utilities implements INode {
                 optional: true,
                 placeholder: 'python',
                 description: 'Path to Python executable (default: python). Use "python3" or full path if needed.'
+            },
+            {
+                label: 'Execution Timeout (seconds)',
+                name: 'executionTimeout',
+                type: 'number',
+                optional: true,
+                default: DEFAULT_TIMEOUT_SECONDS,
+                description: `Maximum script runtime in seconds (default: ${DEFAULT_TIMEOUT_SECONDS}).`
             }
         ]
         this.outputs = [
@@ -85,6 +101,8 @@ class CustomPythonFunction_Utilities implements INode {
         const pythonFunction = nodeData.inputs?.pythonFunction as string
         const functionInputVariablesRaw = nodeData.inputs?.functionInputVariables
         const pythonPath = (nodeData.inputs?.pythonPath as string) || 'python'
+        const executionTimeout = Number(nodeData.inputs?.executionTimeout ?? DEFAULT_TIMEOUT_SECONDS)
+        const timeoutMs = Number.isFinite(executionTimeout) && executionTimeout > 0 ? executionTimeout * 1000 : DEFAULT_TIMEOUT_SECONDS * 1000
         const appDataSource = options.appDataSource as DataSource
         const databaseEntities = options.databaseEntities as IDatabaseEntity
 
@@ -130,6 +148,10 @@ class CustomPythonFunction_Utilities implements INode {
         const tempDir = os.tmpdir()
         const scriptPath = path.join(tempDir, `flowise_python_${Date.now()}_${Math.random().toString(36).substring(7)}.py`)
 
+        const customInputAssignments = Object.keys(inputVars)
+            .map((key, index) => `${toSafePythonVariableName(key, index)} = input_data.get(${JSON.stringify(key)}, None)`)
+            .join('\n')
+
         const pythonScript = `
 import json
 import sys
@@ -141,15 +163,14 @@ input_data = json.loads('''${JSON.stringify(scriptData).replace(/\\/g, '\\\\').r
 input_text = input_data.get('input_text', '')
 vars = input_data.get('vars', {})
 flow = input_data.get('flow', {})
+custom_inputs = {k: v for k, v in input_data.items() if k not in ('input_text', 'vars', 'flow')}
 
 # Extract custom input variables
-${Object.keys(inputVars)
-    .map((key) => `${key} = input_data.get('${key}', None)`)
-    .join('\n')}
+${customInputAssignments}
 
 # User's custom function
 def custom_function():
-${pythonFunction
+${(pythonFunction || 'pass')
     .split('\n')
     .map((line) => '    ' + line)
     .join('\n')}
@@ -170,7 +191,7 @@ except Exception as e:
         fs.writeFileSync(scriptPath, pythonScript, 'utf-8')
 
         try {
-            const result = await this.executePythonScript(pythonPath, scriptPath)
+            const result = await this.executePythonScript(pythonPath, scriptPath, timeoutMs)
 
             try {
                 fs.unlinkSync(scriptPath)
@@ -198,11 +219,17 @@ except Exception as e:
         }
     }
 
-    private executePythonScript(pythonPath: string, scriptPath: string): Promise<string> {
+    private executePythonScript(pythonPath: string, scriptPath: string, timeoutMs: number): Promise<string> {
         return new Promise((resolve, reject) => {
             const pythonProcess = spawn(pythonPath, [scriptPath])
             let output = ''
             let errorOutput = ''
+            let timedOut = false
+
+            const timeoutHandle = setTimeout(() => {
+                timedOut = true
+                pythonProcess.kill('SIGKILL')
+            }, timeoutMs)
 
             pythonProcess.stdout.on('data', (data) => {
                 output += data.toString()
@@ -213,6 +240,11 @@ except Exception as e:
             })
 
             pythonProcess.on('close', (code) => {
+                clearTimeout(timeoutHandle)
+                if (timedOut) {
+                    reject(new Error(`Python script execution timed out after ${Math.floor(timeoutMs / 1000)} seconds`))
+                    return
+                }
                 if (code !== 0) {
                     reject(new Error(`Python script execution failed with code ${code}: ${errorOutput || output}`))
                 } else {
@@ -221,6 +253,7 @@ except Exception as e:
             })
 
             pythonProcess.on('error', (error) => {
+                clearTimeout(timeoutHandle)
                 reject(new Error(`Failed to start Python process: ${error.message}`))
             })
         })
