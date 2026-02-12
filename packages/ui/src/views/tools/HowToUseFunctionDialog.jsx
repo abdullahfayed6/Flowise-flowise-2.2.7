@@ -54,7 +54,7 @@ const HowToUseFunctionDialog = ({ show, onCancel }) => {
                     <li style={{ marginTop: 10 }}>
                         You can get custom variables:&nbsp;<code>{`$vars.<variable-name>`}</code>
                     </li>
-                    <li style={{ marginTop: 10 }}>Must return a string value at the end of function</li>
+                    <li style={{ marginTop: 10 }}>Return value should be JSON-serializable (object, array, string, number, etc.)</li>
                 </ul>
             </DialogContent>
         </Dialog>

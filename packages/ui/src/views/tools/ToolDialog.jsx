@@ -32,30 +32,13 @@ import { generateRandomGradient, formatDataGridRows } from '@/utils/genericHelpe
 import { HIDE_CANVAS_DIALOG, SHOW_CANVAS_DIALOG } from '@/store/actions'
 import ExportAsTemplateDialog from '@/ui-component/dialog/ExportAsTemplateDialog'
 
-const exampleAPIFunc = `/*
-* You can use any libraries imported in Flowise
-* You can use properties specified in Input Schema as variables. Ex: Property = userid, Variable = $userid
-* You can get default flow config: $flow.sessionId, $flow.chatId, $flow.chatflowId, $flow.input, $flow.state
-* You can get custom variables: $vars.<variable-name>
-* Must return a string value at the end of function
-*/
+const exampleAPIFunc = `# Example Python function for Python custom tool
+# You can use libraries installed in the Python runtime.
+# payload contains: payload['input'], payload['vars'], payload['flow']
 
-const fetch = require('node-fetch');
-const url = 'https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current_weather=true';
-const options = {
-    method: 'GET',
-    headers: {
-        'Content-Type': 'application/json'
-    }
-};
-try {
-    const response = await fetch(url, options);
-    const text = await response.text();
-    return text;
-} catch (error) {
-    console.error(error);
-    return '';
-}`
+# Example: return a list of numbers
+return list(range(1, 20))
+`
 
 const ToolDialog = ({ show, dialogProps, onUseTemplate, onCancel, onConfirm, setError }) => {
     const portalElement = document.getElementById('portal')
@@ -530,8 +513,8 @@ const ToolDialog = ({ show, dialogProps, onUseTemplate, onCancel, onConfirm, set
                     <Box>
                         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                             <Stack sx={{ position: 'relative', alignItems: 'center' }} direction='row'>
-                                <Typography variant='overline'>Javascript Function</Typography>
-                                <TooltipWithParser title='Function to execute when tool is being used. You can use properties specified in Input Schema as variables. For example, if the property is <code>userid</code>, you can use as <code>$userid</code>. Return value must be a string. You can also override the code from API by following this <a target="_blank" href="https://docs.flowiseai.com/tools/custom-tool#override-function-from-api">guide</a>' />
+                                <Typography variant='overline'>Python Function</Typography>
+                                <TooltipWithParser title='Function to execute when tool is being used. You can use properties specified in Input Schema as variables. For example, if the property is <code>userid</code>, you can use as <code>$userid</code>. The runner calls a function named <code>__flowise_user_func(payload)</code>. The function should return a JSON-serializable value. You can also override the code from API by following this <a target="_blank" href="https://docs.flowiseai.com/tools/custom-tool#override-function-from-api">guide</a>' />
                             </Stack>
                             <Stack direction='row'>
                                 <Button
@@ -553,7 +536,7 @@ const ToolDialog = ({ show, dialogProps, onUseTemplate, onCancel, onConfirm, set
                             disabled={dialogProps.type === 'TEMPLATE'}
                             value={toolFunc}
                             theme={customization.isDarkMode ? 'dark' : 'light'}
-                            lang={'js'}
+                            lang={'python'}
                             onValueChange={(code) => setToolFunc(code)}
                         />
                     </Box>
